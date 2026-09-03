@@ -36,7 +36,6 @@ def expected_neuron(weights, inputs, bias):
 async def write_reg(dut, address, value):
     """Write a signed 6-bit value into one neuron register."""
 
-    # Drive controls/data away from the active clock edge.
     await FallingEdge(dut.clk)
 
     # uio_in[3:0] = address
@@ -48,7 +47,7 @@ async def write_reg(dut, address, value):
     # Register write occurs on this rising edge.
     await RisingEdge(dut.clk)
 
-    # Remove write enable.
+    # Allow the sequential logic to update before changing controls.
     await FallingEdge(dut.clk)
     dut.uio_in.value = 0
 
@@ -60,17 +59,29 @@ async def run_neuron(dut):
     await FallingEdge(dut.clk)
     dut.uio_in.value = 1 << 5
 
-    # Start is sampled here.
+    # START is sampled here.
     await RisingEdge(dut.clk)
 
-    # START can now be removed. The participant RTL keeps running
-    # independently until it reaches DONE.
+    # Wait until the clocked state update has propagated.
     await FallingEdge(dut.clk)
+
+    # Remove START.
     dut.uio_in.value = 0
+
+    # BUSY should now be asserted.
+    assert (int(dut.uio_out.value) & 0x01) != 0, (
+        "BUSY should be high while the neuron is processing"
+    )
+
+    # DONE should still be low.
+    assert (int(dut.uio_out.value) & 0x02) == 0, (
+        "DONE should be low while the neuron is processing"
+    )
 
     # Wait for DONE.
     for _ in range(20):
         await RisingEdge(dut.clk)
+        await FallingEdge(dut.clk)
 
         if int(dut.uio_out.value) & 0x02:
             return int(dut.uo_out.value)
@@ -130,7 +141,9 @@ async def test_project(dut):
     dut.ui_in.value = 0
     dut.uio_in.value = 0
 
+    # ------------------------------------------------------------------
     # Reset
+    # ------------------------------------------------------------------
     dut._log.info("Reset")
 
     dut.rst_n.value = 0
@@ -141,8 +154,11 @@ async def test_project(dut):
     dut.rst_n.value = 1
 
     await RisingEdge(dut.clk)
+    await FallingEdge(dut.clk)
 
-    # Check output-enable configuration.
+    # ------------------------------------------------------------------
+    # Check output-enable configuration
+    # ------------------------------------------------------------------
     # Participant RTL:
     #   uio_oe[1:0] = 2'b11
     #   uio_oe[7:2] = 6'b0
@@ -153,6 +169,7 @@ async def test_project(dut):
 
     # ------------------------------------------------------------------
     # Test 1
+    #
     # 1*1 + 2*1 + 3*1 + 4*1 + 0 = 10
     # ------------------------------------------------------------------
     dut._log.info("Test 1: basic positive calculation")
@@ -166,6 +183,7 @@ async def test_project(dut):
 
     # ------------------------------------------------------------------
     # Test 2
+    #
     # (-5)*1 + (-5)*1 + (-5)*1 + (-5)*1 + 0 = -20
     # ReLU -> 0
     # ------------------------------------------------------------------
@@ -180,6 +198,7 @@ async def test_project(dut):
 
     # ------------------------------------------------------------------
     # Test 3
+    #
     # 31*4 + 31*4 + 31*4 + 31*4 + 31 = 527
     # Saturation -> 255
     # ------------------------------------------------------------------
@@ -194,6 +213,7 @@ async def test_project(dut):
 
     # ------------------------------------------------------------------
     # Test 4
+    #
     # 3*10 + (-2)*5 + 4*2 + (-1)*3 - 5 = 20
     # ------------------------------------------------------------------
     dut._log.info("Test 4: mixed signed values")
@@ -207,6 +227,7 @@ async def test_project(dut):
 
     # ------------------------------------------------------------------
     # Test 5
+    #
     # (-32)*1 + 0 + 0 + 0 + 0 = -32
     # ReLU -> 0
     # ------------------------------------------------------------------
@@ -221,9 +242,9 @@ async def test_project(dut):
 
     # ------------------------------------------------------------------
     # Test 6
+    #
     # Check BUSY/DONE timing.
     # ------------------------------------------------------------------
-
     dut._log.info("Test 6: BUSY/DONE timing")
 
     await setup_neuron(
@@ -233,30 +254,35 @@ async def test_project(dut):
         bias=0,
     )
 
-    # START
+    # Assert START.
     await FallingEdge(dut.clk)
     dut.uio_in.value = 1 << 5
 
+    # START is sampled here.
     await RisingEdge(dut.clk)
 
-    # After accepting START, the FSM enters MAC0.
-    # BUSY should be asserted.
-    assert (int(dut.uio_out.value) & 0x01) != 0, (
-        "BUSY should be high while the neuron is processing"
-    )
-
-    # DONE should not be high while processing.
-    assert (int(dut.uio_out.value) & 0x02) == 0, (
-        "DONE should be low while the neuron is processing"
-    )
+    # Wait for the state transition to propagate.
+    await FallingEdge(dut.clk)
 
     # Remove START.
-    await FallingEdge(dut.clk)
     dut.uio_in.value = 0
+
+    # BUSY must be high while processing.
+    assert (int(dut.uio_out.value) & 0x01) != 0, (
+        f"BUSY should be high while processing, "
+        f"uio_out=0x{int(dut.uio_out.value):02X}"
+    )
+
+    # DONE must not be high yet.
+    assert (int(dut.uio_out.value) & 0x02) == 0, (
+        f"DONE should be low while processing, "
+        f"uio_out=0x{int(dut.uio_out.value):02X}"
+    )
 
     # Wait until DONE.
     for _ in range(20):
         await RisingEdge(dut.clk)
+        await FallingEdge(dut.clk)
 
         if int(dut.uio_out.value) & 0x02:
             break
@@ -268,19 +294,32 @@ async def test_project(dut):
     #   DONE = 1
     status = int(dut.uio_out.value)
 
-    assert (status & 0x01) == 0, "BUSY should be low in DONE state"
-    assert (status & 0x02) != 0, "DONE should be high in DONE state"
+    assert (status & 0x01) == 0, (
+        f"BUSY should be low in DONE state, "
+        f"uio_out=0x{status:02X}"
+    )
+
+    assert (status & 0x02) != 0, (
+        f"DONE should be high in DONE state, "
+        f"uio_out=0x{status:02X}"
+    )
 
     # Result should be 10.
     assert int(dut.uo_out.value) == 10, (
         f"Expected result 10, got {int(dut.uo_out.value)}"
     )
 
-    # Wait one more cycle. Since START is low, DONE should return to IDLE.
+    # Wait one more cycle. START is low, so DONE should return to IDLE.
     await RisingEdge(dut.clk)
+    await FallingEdge(dut.clk)
 
     assert (int(dut.uio_out.value) & 0x02) == 0, (
         "DONE should return low after START is released"
+    )
+
+    # IDLE means BUSY should also be low.
+    assert (int(dut.uio_out.value) & 0x01) == 0, (
+        "BUSY should be low in IDLE state"
     )
 
     dut._log.info("All neuron tests passed!")
