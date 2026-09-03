@@ -24,7 +24,11 @@ module tb ();
   wire [7:0] uio_out;
   wire [7:0] uio_oe;
 
-  // Instantiate the participant's Tiny Tapeout top module
+  // 20 ns clock period = 50 MHz
+  initial clk = 1'b0;
+  always #10 clk = ~clk;
+
+  // Tiny Tapeout project
   tt_um_neuron user_project (
       .ui_in  (ui_in),
       .uo_out (uo_out),
